@@ -173,7 +173,7 @@ PTS_BONUS_UNICO_ACERTO = 2
 PTS_DONO_SO_UM_ACERTO = 2
 PTS_DONO_TODOS_ACERT = -1
 PTS_ESPIOU_PEGO = -2
-MAX_TURNOS_POR_RODADA = 10
+TURNOS_POR_JOGADOR = 4
 
 
 # Estado Global (nível de classe — compartilhado entre todas as conexões)
@@ -215,6 +215,8 @@ class GameServer(rpyc.Service):
     _historico_dicas = []
 
     _jogo_iniciado = False
+    _votacao_ativa = False
+    _votos = {}
 
     _anfitriao = None
 
@@ -298,12 +300,18 @@ class GameServer(rpyc.Service):
             f"[TURNO {turno_num}] Agora é a vez de: {turno_nome} "
             f"(Rodada {rodada})"
         )
-        if turno_num >= MAX_TURNOS_POR_RODADA:
-            self._broadcast_sistema(
-                f"[RODADA] Limite de {MAX_TURNOS_POR_RODADA} turnos atingido! "
-                f"Use a opção [Novo Objeto] ou [Encerrar Jogo]."
-            )
+        max_turnos = len(GameServer._jogadores) * TURNOS_POR_JOGADOR
 
+        if turno_num >= max_turnos:
+
+            GameServer._jogo_iniciado = False
+            GameServer._votacao_ativa = True
+            GameServer._votos = {}
+
+            self._broadcast_sistema(
+                "[FIM DA RODADA] Limite de turnos atingido!\n"
+                "Todos devem votar para continuar ou encerrar o jogo."
+            )
     # ──> Entrar no jogo
 
     def exposed_entrar(self, nome: str) -> str:
@@ -405,6 +413,60 @@ class GameServer(rpyc.Service):
 
     def exposed_jogadores_lobby(self) -> list:
         return list(GameServer._jogadores.keys())
+
+    def exposed_votacao_ativa(self):
+        return GameServer._votacao_ativa
+
+    def exposed_votar(self, voto):
+
+        if not GameServer._votacao_ativa:
+            return "ERRO: não há votação ativa."
+
+        voto = str(voto).lower()
+
+        if voto not in ("continuar", "encerrar"):
+            return "ERRO: voto inválido."
+
+        with GameServer._lock:
+
+            GameServer._votos[self._nome] = voto
+
+            total = len(GameServer._jogadores)
+
+            self._broadcast_sistema(
+                f"{self._nome} votou."
+            )
+
+            # todos votaram?
+            if len(GameServer._votos) == total:
+
+                continuar = list(
+                    GameServer._votos.values()
+                ).count("continuar")
+
+                encerrar = list(
+                    GameServer._votos.values()
+                ).count("encerrar")
+
+                GameServer._votacao_ativa = False
+
+                if continuar > encerrar:
+
+                    self._broadcast_sistema(
+                        "[VOTAÇÃO] A maioria decidiu continuar!"
+                    )
+
+                    return self.exposed_novo_objeto()
+
+                else:
+
+                    self._broadcast_sistema(
+                        "[VOTAÇÃO] A maioria decidiu encerrar!"
+                    )
+
+                    return self.exposed_encerrar_jogo()
+
+        return "Voto registrado. Aguardando outros jogadores."
 
     # ──> 1. Enviar Dica
 

@@ -152,11 +152,35 @@ def menu_jogo(servidor, nome_local):
     print("  [9]   Listar jogadores conectados")
     print("  [10]  Relembrar meu objeto secreto")
     print("  ── RODADA ─────────────────────────")
-    print("  [12]  Nova rodada (após encerrar)")
-    print("  [13]  Encerrar jogo (placar final)")
     print("  [0]   Sair")
     sep()
     return input("  Escolha: ").strip()
+
+
+def menu_votacao(servidor):
+
+    placar = dict(servidor.placar())
+
+    sep()
+    print("  FIM DA RODADA")
+    sep()
+
+    print("  PLACAR:")
+
+    for jogador, pts in sorted(
+        placar.items(),
+        key=lambda x: -x[1]
+    ):
+        print(f"   {jogador}: {pts} pts")
+
+    sep()
+
+    print("  [1] Continuar jogo")
+    print("  [2] Encerrar jogo")
+
+    sep()
+
+    return input("Escolha: ").strip()
 
 
 # Ponto de entrada
@@ -213,7 +237,29 @@ if __name__ == "__main__":
 
     # ──> Loop principal
     while True:
+
         try:
+            # ──> Votação: Votar para continuar a partida
+            if servidor.votacao_ativa():
+
+                acao = menu_votacao(servidor)
+
+                if acao == "1":
+                    print(
+                        "  →",
+                        servidor.votar("continuar")
+                    )
+
+                elif acao == "2":
+                    print(
+                        "  →",
+                        servidor.votar("encerrar")
+                    )
+
+                else:
+                    print("  Opção inválida.")
+
+                continue
             em_jogo = servidor.jogo_iniciado()
             acao = menu_jogo(servidor, nome) if em_jogo else menu_lobby(
                 servidor, nome)
@@ -398,22 +444,6 @@ if __name__ == "__main__":
                 sep("─")
                 print(str(resposta))
                 sep("─")
-
-            # ──> 12. Nova rodada
-            elif acao == "12":
-                confirma = input(
-                    "  Iniciar nova rodada? (só disponível após encerrar o jogo) (s/n): "
-                ).strip().lower()
-                if confirma == "s":
-                    print("  →", servidor.novo_objeto())
-
-            # ──> 13. Encerrar jogo
-            elif acao == "13":
-                confirma = input(
-                    "  Encerrar o jogo e ver placar final? (s/n): "
-                ).strip().lower()
-                if confirma == "s":
-                    print("  →", servidor.encerrar_jogo())
 
             # ──> 0. Sair
             elif acao == "0":
