@@ -9,11 +9,13 @@ Arquitetura de threads:
     App._poll() consome essa fila no main thread a cada 120 ms.
 """
 
+import os
 import re
 import queue
 import threading
 import tkinter.messagebox as tkmsg
 import customtkinter as ctk
+from PIL import Image
 import rpyc
 
 # ── Configuração visual global
@@ -22,6 +24,8 @@ ctk.set_default_color_theme("blue")
 
 HOST  = "127.0.0.1"
 PORTA = 18861
+
+_PASTA_OBJETOS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "objetos")
 
 
 # ── Utilitário: extrai (nome_obj, arte) de mensagens de reveal do servidor
@@ -349,8 +353,8 @@ class TelaJogo(ctk.CTkFrame):
 
         _sep("── INFO ─────────────────────────")
         _btn("🏆  Ver Placar",                self._placar)
+        _btn("👥  Ver Jogadores",             self._ver_jogadores)
         _btn("🚨  Denunciar Espião",          self._denunciar,       "#3d1e1e")
-        _btn("🔍  Relembrar Meu Objeto",      self._relembrar)
 
         return f
 
@@ -378,11 +382,12 @@ class TelaJogo(ctk.CTkFrame):
                      font=ctk.CTkFont(size=9)).pack(
             anchor="ne", padx=8, pady=(4, 0))
 
-        self._txt_obj = ctk.CTkTextbox(
-            arte_frame, state="disabled",
-            font=ctk.CTkFont(family="Courier New", size=13),
-            fg_color="transparent", wrap="none")
-        self._txt_obj.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._img_label = ctk.CTkLabel(arte_frame, text="")
+        self._img_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._ctk_img  = None
+        self._obj_pil  = None
+
+        arte_frame.bind("<Configure>", self._redimensionar_imagem)
 
         return f
 
@@ -463,15 +468,36 @@ class TelaJogo(ctk.CTkFrame):
         self._txt_chat.see("end")
         self._txt_chat.configure(state="disabled")
 
-    def _set_objeto(self, nome_obj: str, arte: str):
+    def _redimensionar_imagem(self, event=None):
+        if self._obj_pil is None:
+            return
+        if event:
+            w = max(event.width - 20, 50)
+            h = max(event.height - 44, 50)
+        else:
+            self._img_label.update_idletasks()
+            w = max(self._img_label.winfo_width(), 50)
+            h = max(self._img_label.winfo_height(), 50)
+        img = self._obj_pil.copy()
+        img.thumbnail((w, h), Image.LANCZOS)
+        ctk_img = ctk.CTkImage(light_image=img, dark_image=img,
+                               size=(img.width, img.height))
+        self._ctk_img = ctk_img
+        self._img_label.configure(image=ctk_img, text="")
+
+    def _set_objeto(self, nome_obj: str, arte: str = ""):
         self._lbl_nome_obj.configure(
             text=f"[ {nome_obj.upper()} ]",
             text_color="#4fc3f7",
             font=ctk.CTkFont(size=15, weight="bold"))
-        self._txt_obj.configure(state="normal")
-        self._txt_obj.delete("1.0", "end")
-        self._txt_obj.insert("end", arte)
-        self._txt_obj.configure(state="disabled")
+        caminho = os.path.join(_PASTA_OBJETOS, f"{nome_obj.lower()}.png")
+        try:
+            self._obj_pil = Image.open(caminho).convert("RGBA")
+            self._redimensionar_imagem()
+        except Exception:
+            self._obj_pil = None
+            self._img_label.configure(image=None, text=arte or f"[ {nome_obj} ]",
+                                      font=ctk.CTkFont(family="Courier New", size=11))
 
     def set_turno(self, turno: str, rodada: int, num_t: int):
         eh_sua   = turno == self._nome
@@ -647,6 +673,26 @@ class TelaJogo(ctk.CTkFrame):
             txt.insert("end", f"  {icon}  {j}: {pts} pts{marca}\n")
         txt.configure(state="disabled")
 
+    def _ver_jogadores(self):
+        try:
+            jogadores = list(self._srv.jogadores())
+        except Exception as e:
+            tkmsg.showerror("Erro", str(e), parent=self)
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("Jogadores Conectados")
+        win.resizable(False, False)
+        win.grab_set()
+        txt = ctk.CTkTextbox(win, width=300, height=200,
+                             font=ctk.CTkFont(size=13))
+        txt.pack(padx=16, pady=16)
+        txt.insert("end", "  JOGADORES CONECTADOS\n")
+        txt.insert("end", "  " + "─" * 24 + "\n")
+        for j in jogadores:
+            marca = "  ← você" if j == self._nome else ""
+            txt.insert("end", f"   {j}{marca}\n")
+        txt.configure(state="disabled")
+
     def _denunciar(self):
         try:
             ha = bool(self._srv.espionagens_pendentes())
@@ -669,19 +715,6 @@ class TelaJogo(ctk.CTkFrame):
                 str(self._srv.denunciar_espionagem(d.jogador)), "🚨")
         except Exception as e:
             self._log(f"Erro: {e}", "!")
-
-    def _relembrar(self):
-        try:
-            resp = str(self._srv.meu_objeto())
-        except Exception as e:
-            tkmsg.showerror("Erro", str(e), parent=self)
-            return
-        nome_obj, arte = _parse_objeto(resp)
-        if nome_obj:
-            self._set_objeto(nome_obj, arte)
-            self._log(f"Objeto relembrado: [ {nome_obj.upper()} ]", "🔍")
-        else:
-            tkmsg.showinfo("Meu Objeto", resp, parent=self)
 
     def _enviar_chat(self):
         msg = self._entry_chat.get().strip()
@@ -722,7 +755,9 @@ class TelaJogo(ctk.CTkFrame):
             nome_obj, arte = _parse_objeto(msg)
             if nome_obj:
                 self._set_objeto(nome_obj, arte)
-            self._log(msg)
+                self._log(msg.split("\n")[0])
+            else:
+                self._log(msg)
             self._atualizar_header()
 
         elif tipo == "dica":

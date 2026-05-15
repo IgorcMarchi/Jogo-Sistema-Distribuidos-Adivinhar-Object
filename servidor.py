@@ -7,21 +7,6 @@ Arquitetura:
     global fica em variáveis de CLASSE (compartilhadas).
   - O servidor notifica clientes de forma assíncrona chamando
     métodos exposed_* no conn.root (objeto do cliente).
-
-Correções aplicadas nesta versão:
-  - self._nome inicializado como None em on_connect para evitar
-    AttributeError em on_disconnect antes de exposed_entrar()
-  - Docstrings de exposed_novo_objeto e exposed_encerrar_jogo
-    movidas para antes das validações de guarda
-  - Ordem de validações em exposed_novo_objeto corrigida
-    (self._nome verificado antes do anfitrião)
-  - _avancar_turno_interno não é mais chamado dentro do lock
-    em exposed_enviar_dica, evitando deadlock via broadcast
-  - Condição todos_acertaram corrigida para >= 1 adversário
-    (antes exigia > 1, ignorando partidas de 2 jogadores)
-  - exposed_entrar define self._nome antes de qualquer retorno
-    de erro após o registro, garantindo limpeza em disconnect
-
 """
 
 import rpyc
@@ -39,129 +24,6 @@ OBJETOS_DISPONIVEIS = [
     "amuleto", "tocha", "cajado", "elmo", "flecha",
 ]
 
-ARTE_OBJETOS = {
-    "espada": r"""
-       *
-      ***
-       |
-       |
-       |
-   =========
-       |""",
-
-    "escudo": r"""
-   .-------.
-  / [++++] \
- |  |    |  |
-  \ [++++] /
-   '-------'
-       V""",
-
-    "poção": r"""
-    _____
-   |_____|
-   /~~~~~\
-  / * * * \
- |  *   *  |
-  \~~~~~~~/
-   '-----'""",
-
-    "mapa": r"""
-  .---------.
-  | ~ ^ ~   |
-  | .---. ~ |
-  | | x |   |
-  | '---' ~ |
-  '---------'""",
-
-    "chave": r"""
-    _____
-   /  o  \
-  | (   ) |
-   \_____/
-      |
-      |---
-      |
-      |---""",
-
-    "lanterna": r"""
-    _____
-   (_____)
-   |     |
-   | ))) |
-   |_____|
-    | | |
-    |_|_|""",
-
-    "corda": r"""
-   /\/\/\/\
-  (        )
- (  ()()()  )
-  (        )
-   \/\/\/\/""",
-
-    "bússola": r"""
-   +-------+
-   |   N   |
-   | W * E |
-   |   S   |
-   +-------+""",
-
-    "cristal": r"""
-      /\
-     /  \
-    / ** \
-   /*    *\
-   \*    */
-    \  * /
-     \  /
-      \/""",
-
-    "pergaminho": r"""
-   __________
-  (          )
-  | ~~~~~~~~ |
-  | ~~~~~~~~ |
-  | ~~~~~~~~ |
-  (__________)""",
-
-    "amuleto": r"""
-    _______
-   / ~~~~~ \
-  | (*.*.*) |
-  |  \___/  |
-   \_______/
-       |
-      [*]""",
-
-    "tocha": r"""
-     ) (
-    ( ) )
-   ) ( ) (
-     | |
-     | |
-    /   \ """,
-
-    "cajado": r"""
-     (*)
-      |
-      |
-      |
-      |
-      |
-     /|\ """,
-
-    "elmo": r"""
-    _______
-   /       \
-  | [o] [o] |
-  |   ___   |
-  |  (   )  |
-   \_______/""",
-
-    "flecha": r"""
-  >>---------->>>""",
-}
 
 
 # Constantes de pontuação
@@ -455,12 +317,10 @@ class GameServer(rpyc.Service):
                 obj = random.choice(disponiveis)
                 usados.add(obj)
                 info["objeto"] = obj
-                arte = ARTE_OBJETOS.get(obj, "")
                 notificacoes.append((
                     info["conn"],
                     f"[INÍCIO] A partida começou!\n"
                     f"Seu objeto secreto é: [{obj.upper()}]\n"
-                    f"{arte}\n"
                     f"Guarde bem seu objeto!"
                 ))
             GameServer._turno_idx = 0
@@ -556,16 +416,12 @@ class GameServer(rpyc.Service):
                         info["acertadores"] = set()
                         info["trocas_usadas"] = False
 
-                        arte = ARTE_OBJETOS.get(obj, "")
-
                         try:
                             rpyc.async_(
                                 info["conn"].root.notificar_sistema
                             )(
-                                f"[NOVA RODADA {GameServer._rodada}] "
-                                f"Seu novo objeto secreto é: "
-                                f"[{obj.upper()}]\n"
-                                f"{arte}"
+                                f"[NOVA RODADA {GameServer._rodada}]\n"
+                                f"Seu objeto secreto é: [{obj.upper()}]"
                             )
                         except Exception:
                             pass
@@ -732,7 +588,7 @@ class GameServer(rpyc.Service):
         )
 
         GameServer._eventos_pendentes.append(
-            "[TROCA] Dois jogadores realizaram uma troca privada nesta rodada."
+            "[TROCA] Dois jogadores realizaram uma troca privada de dicas nesta rodada."
         )
 
         return f"Troca concluída! Você recebeu a palavra: '{palavra_a}'"
@@ -812,64 +668,44 @@ class GameServer(rpyc.Service):
         with GameServer._lock:
 
             registros = GameServer._espionagens_rodada.get(rodada, [])
-
             alvo_registro = None
 
             for reg in registros:
-
-                # verifica se o jogador denunciado realmente espionou
-                # uma conversa envolvendo quem denunciou
                 if (
                     reg["espiao"] == espiao
                     and self._nome in (reg["alvo_a"], reg["alvo_b"])
                     and not reg["denunciado"]
                 ):
-
                     alvo_registro = reg
                     break
 
-            # ERROU A DENÚNCIA
-            if not alvo_registro:
+            if alvo_registro:
+                alvo_registro["denunciado"] = True
+                recompensa = 4
+                if espiao in GameServer._jogadores:
+                    GameServer._jogadores[espiao]["pontos"] += PTS_ESPIOU_PEGO
+                    GameServer._jogadores[self._nome]["pontos"] += recompensa
+                    pontos_atuais = GameServer._jogadores[espiao]["pontos"]
+                    pontos_denunciante = GameServer._jogadores[self._nome]["pontos"]
+                else:
+                    pontos_atuais = "?"
+                    pontos_denunciante = "?"
 
-                self._broadcast_sistema(
-                    f"[DENÚNCIA] {self._nome} acusou {espiao}, "
-                    f"mas não havia provas de espionagem."
-                )
+        # ERROU A DENÚNCIA
+        if not alvo_registro:
+            self._broadcast_sistema(
+                f"[DENÚNCIA] {self._nome} acusou {espiao}, "
+                f"mas não havia provas de espionagem."
+            )
+            self._avancar_turno_interno()
+            return f"Você denunciou {espiao}, mas ele não espionou sua conversa."
 
-                return (
-                    f"Você denunciou {espiao}, mas ele não espionou sua conversa."
-                )
-
-            # denúncia correta
-            alvo_registro["denunciado"] = True
-
-            if espiao in GameServer._jogadores:
-
-                # tira pontos do espião
-                GameServer._jogadores[espiao]["pontos"] += PTS_ESPIOU_PEGO
-
-                # recompensa quem descobriu
-                recompensa = abs(PTS_ESPIOU_PEGO)
-
-                GameServer._jogadores[self._nome]["pontos"] += recompensa
-
-                pontos_atuais = GameServer._jogadores[espiao]["pontos"]
-
-                pontos_denunciante = (
-                    GameServer._jogadores[self._nome]["pontos"]
-                )
-
-            else:
-
-                pontos_atuais = "?"
-                pontos_denunciante = "?"
-
+        # DENÚNCIA CORRETA
         self._broadcast_sistema(
             f"[DENÚNCIA] {self._nome} descobriu o espião {espiao}! "
             f"{espiao} perde -{abs(PTS_ESPIOU_PEGO)} pts "
-            f"e {self._nome} ganha +{abs(PTS_ESPIOU_PEGO)} pts."
+            f"e {self._nome} ganha +4 pts."
         )
-
         self._notificar_um(
             espiao,
             f"[PUNIÇÃO] Você foi descoberto espionando "
@@ -877,11 +713,12 @@ class GameServer(rpyc.Service):
             f"{PTS_ESPIOU_PEGO} pts. "
             f"Total: {pontos_atuais}"
         )
+        self._avancar_turno_interno()
 
         return (
             f"Você descobriu o espião {espiao}! "
             f"Ele perdeu {abs(PTS_ESPIOU_PEGO)} pts "
-            f"e você ganhou +{abs(PTS_ESPIOU_PEGO)} pts.\n"
+            f"e você ganhou +4 pts.\n"
             f"Seu total agora é: {pontos_denunciante} pts."
         )
 
@@ -899,6 +736,7 @@ class GameServer(rpyc.Service):
         acertou = chute.strip().lower() == objeto_real.lower()
 
         if not acertou:
+            self._avancar_turno_interno()
             return f"Errou! '{chute}' não é o objeto de {alvo}. Continue tentando!"
 
         with GameServer._lock:
@@ -953,6 +791,7 @@ class GameServer(rpyc.Service):
             self._nome,
             f"[PALPITE] {self._nome} adivinhou o objeto de {alvo}!"
         )
+        self._avancar_turno_interno()
 
         return (
             f"ACERTOU! O objeto de {alvo} é '{objeto_real}'. "
@@ -1118,12 +957,10 @@ class GameServer(rpyc.Service):
                 info["objeto"] = obj
                 info["acertadores"] = set()
                 info["trocas_usadas"] = 0
-                arte = ARTE_OBJETOS.get(obj, "")
                 try:
                     rpyc.async_(info["conn"].root.notificar_sistema)(
-                        f"[NOVA RODADA {GameServer._rodada}] "
-                        f"Seu novo objeto secreto é: [{obj.upper()}]\n"
-                        f"{arte}"
+                        f"[NOVA RODADA {GameServer._rodada}]\n"
+                        f"Seu objeto secreto é: [{obj.upper()}]"
                     )
                 except Exception:
                     pass
@@ -1237,14 +1074,9 @@ class GameServer(rpyc.Service):
             if not info:
                 return "ERRO: jogador não encontrado."
             obj = info["objeto"]
-            arte = ARTE_OBJETOS.get(obj, "") if obj else ""
         if obj is None:
             return "Objeto ainda não atribuído."
-        return (
-            f"Seu objeto secreto: [{obj.upper()}]\n"
-            f"{arte}\n"
-            f"  (Dê apenas dicas — não revele diretamente!)"
-        )
+        return f"Seu objeto secreto: [{obj.upper()}]"
 
     def exposed_espionagens_pendentes(self) -> bool:
 
