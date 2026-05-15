@@ -173,7 +173,7 @@ PTS_BONUS_UNICO_ACERTO = 2
 PTS_DONO_SO_UM_ACERTO = 2
 PTS_DONO_TODOS_ACERT = -1
 PTS_ESPIOU_PEGO = -2
-TURNOS_POR_JOGADOR = 4
+TURNOS_POR_JOGADOR = 3
 
 
 # Estado Global (nível de classe — compartilhado entre todas as conexões)
@@ -208,6 +208,7 @@ class GameServer(rpyc.Service):
     _trocas_realizadas = []
 
     _espionagens_rodada = {}
+    _espionagem_chat = []
 
     _historico_chat_publico = []
     _historico_chat_privado = {}
@@ -217,6 +218,7 @@ class GameServer(rpyc.Service):
     _jogo_iniciado = False
     _votacao_ativa = False
     _votos = {}
+    _eventos_pendentes = []
 
     _anfitriao = None
 
@@ -295,11 +297,82 @@ class GameServer(rpyc.Service):
             turno_nome = GameServer._turno_atual
             rodada = GameServer._rodada
 
-        # broadcast FORA do lock
+        # primeiro anuncia o turno
         self._broadcast_sistema(
             f"[TURNO {turno_num}] Agora é a vez de: {turno_nome} "
             f"(Rodada {rodada})"
         )
+        # ENTREGA ESPIONAGENS PENDENTES AO ESPIÃO
+        with GameServer._lock:
+
+            registros = GameServer._espionagens_rodada.get(rodada, [])
+
+        for reg in registros:
+
+            if reg["espiao"] != turno_nome:
+                continue
+
+            if not reg["mensagens"]:
+                continue
+
+            espiao_cli = self._cliente(turno_nome)
+
+            if not espiao_cli:
+                continue
+
+            for msg in reg["mensagens"]:
+
+                if msg["tipo"] == "troca":
+
+                    try:
+
+                        rpyc.async_(espiao_cli.notificar_sistema)(
+                            "[ESPIONAGEM]\n"
+                            f"Você espionou a troca entre "
+                            f"{msg['a']} e {msg['b']}!\n"
+                            f"{msg['a']} disse: '{msg['pa']}'\n"
+                            f"{msg['b']} disse: '{msg['pb']}'"
+                        )
+
+                    except Exception:
+                        pass
+
+            reg["mensagens"].clear()
+
+        # MOSTRA EVENTOS SOMENTE QUANDO O CICLO REINICIA
+        primeiro_jogador = GameServer._ordem_turnos[0]
+
+        if turno_nome == primeiro_jogador:
+
+            # eventos de troca
+            with GameServer._lock:
+
+                eventos = list(GameServer._eventos_pendentes)
+
+                GameServer._eventos_pendentes.clear()
+
+            for evento in eventos:
+                self._broadcast_sistema(evento)
+
+            # eventos de espionagem
+            with GameServer._lock:
+
+                houve_espiao = any(
+                    not reg["avisado"]
+                    for regs in GameServer._espionagens_rodada.values()
+                    for reg in regs
+                )
+
+                if houve_espiao:
+
+                    for regs in GameServer._espionagens_rodada.values():
+                        for reg in regs:
+                            reg["avisado"] = True
+
+            if houve_espiao:
+                self._broadcast_sistema(
+                    "[ESPIONAGEM] Houve um espião na rodada."
+                )
         max_turnos = len(GameServer._jogadores) * TURNOS_POR_JOGADOR
 
         if turno_num >= max_turnos:
@@ -328,7 +401,7 @@ class GameServer(rpyc.Service):
                 "objeto":      None,
                 "pontos":      0,
                 "acertadores": set(),
-                "troca_usada": False,
+                "trocas_usadas": 0,
             }
             GameServer._ordem_turnos.append(nome)
 
@@ -437,7 +510,7 @@ class GameServer(rpyc.Service):
                 f"{self._nome} votou."
             )
 
-            # todos votaram?
+            # Todos votaram?
             if len(GameServer._votos) == total:
 
                 continuar = list(
@@ -450,21 +523,81 @@ class GameServer(rpyc.Service):
 
                 GameServer._votacao_ativa = False
 
+            
+                # CONTINUAR JOGO
+               
                 if continuar > encerrar:
 
-                    self._broadcast_sistema(
-                        "[VOTAÇÃO] A maioria decidiu continuar!"
+                    GameServer._rodada += 1
+                    GameServer._num_turno = 0
+                    GameServer._jogo_iniciado = True
+
+                    GameServer._espionagens_rodada = {}
+                    GameServer._trocas_pendentes = {}
+                    GameServer._historico_dicas = []
+
+                    usados = set()
+
+                    for nome, info in GameServer._jogadores.items():
+
+                        disponiveis = [
+                            o for o in OBJETOS_DISPONIVEIS
+                            if o not in usados
+                        ]
+
+                        if not disponiveis:
+                            disponiveis = OBJETOS_DISPONIVEIS
+
+                        obj = random.choice(disponiveis)
+
+                        usados.add(obj)
+
+                        info["objeto"] = obj
+                        info["acertadores"] = set()
+                        info["trocas_usadas"] = False
+
+                        arte = ARTE_OBJETOS.get(obj, "")
+
+                        try:
+                            rpyc.async_(
+                                info["conn"].root.notificar_sistema
+                            )(
+                                f"[NOVA RODADA {GameServer._rodada}] "
+                                f"Seu novo objeto secreto é: "
+                                f"[{obj.upper()}]\n"
+                                f"{arte}"
+                            )
+                        except Exception:
+                            pass
+
+                    GameServer._turno_idx = 0
+
+                    GameServer._turno_atual = (
+                        GameServer._ordem_turnos[0]
+                        if GameServer._ordem_turnos
+                        else None
                     )
 
-                    return self.exposed_novo_objeto()
+                    self._broadcast_sistema(
+                        f"[VOTAÇÃO] A maioria decidiu continuar!\n"
+                        f"Nova rodada iniciada!\n"
+                        f"Primeiro turno: {GameServer._turno_atual}"
+                    )
+
+                    return "Nova rodada iniciada."
+
+
+                # ENCERRAR JOGO
 
                 else:
 
+                    GameServer._jogo_iniciado = False
+
                     self._broadcast_sistema(
-                        "[VOTAÇÃO] A maioria decidiu encerrar!"
+                        "[VOTAÇÃO] A maioria decidiu encerrar o jogo!"
                     )
 
-                    return self.exposed_encerrar_jogo()
+                    return "Jogo encerrado."
 
         return "Voto registrado. Aguardando outros jogadores."
 
@@ -518,8 +651,8 @@ class GameServer(rpyc.Service):
             return "ERRO: você não pode trocar com você mesmo."
 
         info_self = GameServer._jogadores.get(self._nome, {})
-        if info_self.get("troca_usada"):
-            return "ERRO: você já usou sua troca privada nesta rodada."
+        if info_self.get("trocas_usadas", 0) >= 3:
+            return "ERRO: você já usou suas 3 trocas privadas nesta rodada."
 
         with GameServer._lock:
             GameServer._trocas_pendentes[self._nome] = {
@@ -555,21 +688,52 @@ class GameServer(rpyc.Service):
                 "pb":     palavra_b,
                 "rodada": GameServer._rodada,
             })
+
+            # ENTREGA PARA ESPIÕES
+            for reg in GameServer._espionagens_rodada.get(GameServer._rodada, []):
+
+                envolvidos = {reg["alvo_a"], reg["alvo_b"]}
+                troca_real = {solicitante, self._nome}
+
+                # espionagem correta
+                if envolvidos == troca_real:
+
+                    reg["mensagens"].append({
+                        "tipo": "troca",
+                        "a": solicitante,
+                        "b": self._nome,
+                        "pa": palavra_a,
+                        "pb": palavra_b,
+                    })
+
+                    espiao_cli = self._cliente(reg["espiao"])
+
+                    if espiao_cli:
+                        try:
+
+                            rpyc.async_(espiao_cli.notificar_sistema)(
+                                "[ESPIONAGEM]\n"
+                                f"Você espionou a troca entre "
+                                f"{solicitante} e {self._nome}!\n"
+                                f"{solicitante} disse: '{palavra_a}'\n"
+                                f"{self._nome} disse: '{palavra_b}'"
+                            )
+
+                        except Exception:
+                            pass
+
             del GameServer._trocas_pendentes[solicitante]
-            GameServer._jogadores[solicitante]["troca_usada"] = True
-            GameServer._jogadores[self._nome]["troca_usada"] = True
+            GameServer._jogadores[solicitante]["trocas_usadas"] += 1
+            GameServer._jogadores[self._nome]["trocas_usadas"] += 1
 
         self._notificar_um(
             solicitante,
             f"[TROCA] {self._nome} aceitou. Palavra recebida: '{palavra_b}'"
         )
 
-        aviso = (
-            f"[TROCA] {solicitante} e {self._nome} realizaram uma troca privada de dicas."
+        GameServer._eventos_pendentes.append(
+            "[TROCA] Dois jogadores realizaram uma troca privada nesta rodada."
         )
-        for nome in list(GameServer._jogadores.keys()):
-            if nome not in (solicitante, self._nome):
-                self._notificar_um(nome, aviso)
 
         return f"Troca concluída! Você recebeu a palavra: '{palavra_a}'"
 
@@ -589,97 +753,137 @@ class GameServer(rpyc.Service):
     # ──> 3. Espionagem
 
     def exposed_espionar(self, jogador_a: str, jogador_b: str) -> str:
+
         if not self._nome:
             return "ERRO: entre no jogo primeiro."
+
         if self._nome in (jogador_a, jogador_b):
-            return "ERRO: você não pode espionar uma troca da qual participou."
-
-        troca = None
-        for t in reversed(GameServer._trocas_realizadas):
-            if {t["a"], t["b"]} == {jogador_a, jogador_b} and t["rodada"] == GameServer._rodada:
-                troca = t
-                break
-
-        if not troca:
-            return f"ERRO: nenhuma troca encontrada entre {jogador_a} e {jogador_b} nesta rodada."
-
-        rodada = GameServer._rodada
-        detectado = random.random() < 0.4
+            return "ERRO: você não pode espionar sua própria conversa."
 
         with GameServer._lock:
+
+            rodada = GameServer._rodada
+
             if rodada not in GameServer._espionagens_rodada:
                 GameServer._espionagens_rodada[rodada] = []
+
             GameServer._espionagens_rodada[rodada].append({
-                "espiao":     self._nome,
-                "alvo_a":     jogador_a,
-                "alvo_b":     jogador_b,
-                "detectado":  detectado,
+
+                "espiao": self._nome,
+
+                "alvo_a": jogador_a,
+                "alvo_b": jogador_b,
+
+                "mensagens": [],
+
+                "avisado": False,
                 "denunciado": False,
+
+                "turno_detectar":
+                    GameServer._num_turno + len(GameServer._jogadores)
             })
 
-        if detectado:
-            for alvo, parceiro in ((jogador_a, jogador_b), (jogador_b, jogador_a)):
-                cli = self._cliente(alvo)
-                if cli:
-                    try:
-                        rpyc.async_(cli.notificar_espionagem)(
-                            self._nome, pego=True)
-                    except Exception:
-                        pass
-                self._notificar_um(
-                    alvo,
-                    f"[ESPIONAGEM] {self._nome} foi detectado espiando sua troca com {parceiro}! "
-                    f"Use a opção [Denunciar Espião] para puni-lo."
-                )
-            return (
-                f"[ESPIONAGEM] Você foi DETECTADO! Os jogadores foram alertados e podem te denunciar. "
-                f"Se denunciado: -{abs(PTS_ESPIOU_PEGO)} pts."
-            )
-        else:
-            return (
-                f"[ESPIONAGEM] Sucesso! Troca entre {troca['a']} e {troca['b']}: "
-                f"'{troca['a']}' usou '{troca['pa']}' | '{troca['b']}' usou '{troca['pb']}'"
-            )
-
+        return (
+            "[ESPIONAGEM] Espionagem registrada.\n"
+            "Aguarde até seu próximo turno."
+        )
     def exposed_denunciar_espionagem(self, espiao: str) -> str:
+
         if not self._nome:
             return "ERRO: entre no jogo primeiro."
 
         rodada = GameServer._rodada
+        # libera espionagens após uma volta completa
+        registros = GameServer._espionagens_rodada.get(rodada, [])
+
+        for reg in registros:
+
+            if (
+                not reg["avisado"]
+                and GameServer._num_turno >= reg["turno_detectar"]
+            ):
+
+                reg["avisado"] = True
+
+                self._broadcast_sistema(
+                    "[ESPIONAGEM] Alguém espionou uma conversa na rodada passada."
+                )
+
         with GameServer._lock:
+
             registros = GameServer._espionagens_rodada.get(rodada, [])
+
             alvo_registro = None
+
             for reg in registros:
-                if (reg["espiao"] == espiao
-                        and self._nome in (reg["alvo_a"], reg["alvo_b"])
-                        and reg["detectado"]
-                        and not reg["denunciado"]):
+
+                # verifica se o jogador denunciado realmente espionou
+                # uma conversa envolvendo quem denunciou
+                if (
+                    reg["espiao"] == espiao
+                    and self._nome in (reg["alvo_a"], reg["alvo_b"])
+                    and not reg["denunciado"]
+                ):
+
                     alvo_registro = reg
                     break
 
+            # ERROU A DENÚNCIA
             if not alvo_registro:
-                return (
-                    f"ERRO: nenhuma espionagem detectada de '{espiao}' para você "
-                    f"nesta rodada, ou já foi denunciada."
+
+                self._broadcast_sistema(
+                    f"[DENÚNCIA] {self._nome} acusou {espiao}, "
+                    f"mas não havia provas de espionagem."
                 )
 
+                return (
+                    f"Você denunciou {espiao}, mas ele não espionou sua conversa."
+                )
+
+            # denúncia correta
             alvo_registro["denunciado"] = True
+
             if espiao in GameServer._jogadores:
+
+                # tira pontos do espião
                 GameServer._jogadores[espiao]["pontos"] += PTS_ESPIOU_PEGO
+
+                # recompensa quem descobriu
+                recompensa = abs(PTS_ESPIOU_PEGO)
+
+                GameServer._jogadores[self._nome]["pontos"] += recompensa
+
                 pontos_atuais = GameServer._jogadores[espiao]["pontos"]
+
+                pontos_denunciante = (
+                    GameServer._jogadores[self._nome]["pontos"]
+                )
+
             else:
+
                 pontos_atuais = "?"
+                pontos_denunciante = "?"
 
         self._broadcast_sistema(
-            f"[DENÚNCIA] {self._nome} denunciou {espiao} por espionagem! "
-            f"{espiao} perde {abs(PTS_ESPIOU_PEGO)} pts."
+            f"[DENÚNCIA] {self._nome} descobriu o espião {espiao}! "
+            f"{espiao} perde -{abs(PTS_ESPIOU_PEGO)} pts "
+            f"e {self._nome} ganha +{abs(PTS_ESPIOU_PEGO)} pts."
         )
+
         self._notificar_um(
             espiao,
-            f"[PUNIÇÃO] Você foi denunciado por {self._nome}! "
-            f"{PTS_ESPIOU_PEGO} pts. Total: {pontos_atuais}"
+            f"[PUNIÇÃO] Você foi descoberto espionando "
+            f"{self._nome}! "
+            f"{PTS_ESPIOU_PEGO} pts. "
+            f"Total: {pontos_atuais}"
         )
-        return f"{espiao} foi denunciado e perde {abs(PTS_ESPIOU_PEGO)} pts!"
+
+        return (
+            f"Você descobriu o espião {espiao}! "
+            f"Ele perdeu {abs(PTS_ESPIOU_PEGO)} pts "
+            f"e você ganhou +{abs(PTS_ESPIOU_PEGO)} pts.\n"
+            f"Seu total agora é: {pontos_denunciante} pts."
+        )
 
     # ── 4. Palpite
 
@@ -799,7 +1003,63 @@ class GameServer(rpyc.Service):
             if len(GameServer._historico_chat_privado[chave]) > 100:
                 GameServer._historico_chat_privado[chave] = \
                     GameServer._historico_chat_privado[chave][-100:]
+        
+        # ENTREGA PARA ESPIÕES
+        for rodada, registros in GameServer._espionagens_rodada.items():
 
+            if rodada != GameServer._rodada:
+                continue
+
+            for reg in registros:
+
+                if reg["espiao"] == self._nome:
+                    continue
+
+                envolvidos = {reg["alvo_a"], reg["alvo_b"]}
+
+                if {self._nome, destinatario} == envolvidos:
+
+                    espiao_cli = self._cliente(reg["espiao"])
+
+                    if espiao_cli:
+                        try:
+                            # ENTREGA PARA ESPIÕES
+                            for rodada, registros in GameServer._espionagens_rodada.items():
+
+                                if rodada != GameServer._rodada:
+                                    continue
+
+                                for reg in registros:
+
+                                    if reg["espiao"] == self._nome:
+                                        continue
+
+                                    envolvidos = {reg["alvo_a"], reg["alvo_b"]}
+
+                                    # conversa espionada encontrada
+                                    if {self._nome, destinatario} == envolvidos:
+
+                                        # salva no histórico da espionagem
+                                        reg["mensagens"].append({
+                                            "de": self._nome,
+                                            "para": destinatario,
+                                            "texto": texto
+                                        })
+
+                                        espiao_cli = self._cliente(reg["espiao"])
+
+                                        if espiao_cli:
+                                            try:
+
+                                                rpyc.async_(espiao_cli.receber_chat_privado)(
+                                                    f"ESPIANDO {self._nome}",
+                                                    f"[para {destinatario}] {texto}"
+                                                )
+
+                                            except Exception:
+                                                pass
+                        except Exception:
+                            pass
         cli = self._cliente(destinatario)
         if cli:
             try:
@@ -857,7 +1117,7 @@ class GameServer(rpyc.Service):
                 usados.add(obj)
                 info["objeto"] = obj
                 info["acertadores"] = set()
-                info["troca_usada"] = False
+                info["trocas_usadas"] = 0
                 arte = ARTE_OBJETOS.get(obj, "")
                 try:
                     rpyc.async_(info["conn"].root.notificar_sistema)(
@@ -980,17 +1240,24 @@ class GameServer(rpyc.Service):
             f"  (Dê apenas dicas — não revele diretamente!)"
         )
 
-    def exposed_espionagens_pendentes(self) -> list:
+    def exposed_espionagens_pendentes(self) -> bool:
+
         if not self._nome:
-            return []
+            return False
+
         rodada = GameServer._rodada
-        resultado = []
+
         for reg in GameServer._espionagens_rodada.get(rodada, []):
-            if (self._nome in (reg["alvo_a"], reg["alvo_b"])
-                    and reg["detectado"]
-                    and not reg["denunciado"]):
-                resultado.append(reg["espiao"])
-        return resultado
+
+            if (
+                self._nome in (reg["alvo_a"], reg["alvo_b"])
+                and reg["avisado"]
+                and not reg["denunciado"]
+            ):
+
+                return True
+
+        return False
 
 
 # Ponto de entrada

@@ -239,6 +239,13 @@ if __name__ == "__main__":
     while True:
 
         try:
+
+            # força atualização em tempo real
+            em_jogo = bool(servidor.jogo_iniciado())
+
+            # se existir votação ativa, considera como "em jogo"
+            if servidor.votacao_ativa():
+                em_jogo = True
             # ──> Votação: Votar para continuar a partida
             if servidor.votacao_ativa():
 
@@ -277,9 +284,11 @@ if __name__ == "__main__":
                 continue
 
             # ──> Bloqueia ações de jogo se ainda no lobby
-            if not em_jogo and acao not in ("0", "6", "6h"):
-                print("  ⚠  A partida ainda não foi iniciada. Aguarde o anfitrião.")
-                continue
+            # revalida imediatamente antes de bloquear
+            if not bool(servidor.jogo_iniciado()) and not servidor.votacao_ativa():
+                if acao not in ("0", "6", "6h"):
+                    print("  ⚠  A partida ainda não foi iniciada. Aguarde o anfitrião.")
+                    continue
 
             # ──> 1. Enviar dica
             if acao == "1":
@@ -422,13 +431,22 @@ if __name__ == "__main__":
 
             # ──> 8. Denunciar espião
             elif acao == "8":
-                pendentes = list(servidor.espionagens_pendentes())
-                if not pendentes:
-                    print("  Nenhum espião detectado para denunciar nesta rodada.")
+                ha_espionagem = servidor.espionagens_pendentes()
+                if not ha_espionagem:
+                    print("  Nenhuma espionagem suspeita nesta rodada.")
                 else:
-                    print(f"  Espiões detectados: {', '.join(pendentes)}")
-                    espiao = input("  Quem deseja denunciar? ").strip()
-                    print("  →", servidor.denunciar_espionagem(espiao))
+                    print(
+                        "  Você suspeita que alguém espionou sua conversa."
+                    )
+
+                    espiao = input(
+                        "  Quem deseja denunciar? "
+                    ).strip()
+
+                    print(
+                        "  →",
+                        servidor.denunciar_espionagem(espiao)
+                    )
 
             # ──> 9. Listar jogadores
             elif acao == "9":
