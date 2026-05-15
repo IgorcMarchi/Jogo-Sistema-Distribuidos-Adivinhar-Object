@@ -1228,12 +1228,18 @@ class GameServer(rpyc.Service):
         return GameServer._num_turno
 
     def exposed_meu_objeto(self) -> str:
-        if not self._nome or self._nome not in GameServer._jogadores:
+        if not self._nome:
             return "ERRO: não registrado."
-        obj = GameServer._jogadores[self._nome]["objeto"]
+        with GameServer._lock:
+            if not GameServer._jogo_iniciado:
+                return "Os objetos ainda não foram distribuídos (a partida não foi iniciada)."
+            info = GameServer._jogadores.get(self._nome)
+            if not info:
+                return "ERRO: jogador não encontrado."
+            obj = info["objeto"]
+            arte = ARTE_OBJETOS.get(obj, "") if obj else ""
         if obj is None:
-            return "Objeto ainda não atribuído (jogo não iniciado)."
-        arte = ARTE_OBJETOS.get(obj, "")
+            return "Objeto ainda não atribuído."
         return (
             f"Seu objeto secreto: [{obj.upper()}]\n"
             f"{arte}\n"
